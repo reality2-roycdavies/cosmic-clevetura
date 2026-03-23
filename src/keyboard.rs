@@ -300,6 +300,11 @@ impl KeyboardConnection {
     pub fn device_info(&self) -> &DeviceInfo {
         &self.info
     }
+
+    /// Get a reference to the underlying HID device for protobuf protocol.
+    pub fn device(&self) -> &HidDevice {
+        &self.device
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

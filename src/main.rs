@@ -4,6 +4,7 @@ mod config;
 mod hid;
 mod keyboard;
 mod profiles;
+mod proto;
 mod settings;
 mod settings_cli;
 mod settings_page;
@@ -32,6 +33,46 @@ fn main() -> cosmic::iced::Result {
             }
             "--watch" => {
                 keyboard::watch_reports();
+                Ok(())
+            }
+            "--get-settings" => {
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        proto::print_settings(conn.device());
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
+                Ok(())
+            }
+            "--set-sensitivity" => {
+                if args.len() < 3 {
+                    eprintln!("Usage: cosmic-clevetura --set-sensitivity <1-9>");
+                    std::process::exit(1);
+                }
+                let level: u32 = args[2].parse().unwrap_or(0);
+                if !(1..=9).contains(&level) {
+                    eprintln!("Sensitivity must be 1-9");
+                    std::process::exit(1);
+                }
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        // Get current settings first
+                        match proto::get_settings(conn.device()) {
+                            Ok(mut settings) => {
+                                let global = settings.global.get_or_insert_with(Default::default);
+                                global.current_ai_level = Some(level);
+                                match proto::set_settings(conn.device(), settings) {
+                                    Ok(()) => println!("Sensitivity set to {level}"),
+                                    Err(e) => eprintln!("Failed to set sensitivity: {e}"),
+                                }
+                            }
+                            Err(e) => eprintln!("Failed to get current settings: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
                 Ok(())
             }
             "--ble-scan" => {
@@ -116,6 +157,8 @@ fn print_help(program: &str) {
     println!("  --detect           Detect connected Clevetura keyboards");
     println!("  --probe            Probe HID feature reports (development)");
     println!("  --watch            Watch report 0xDB for changes (development)");
+    println!("  --get-settings     Read current settings from keyboard firmware");
+    println!("  --set-sensitivity <1-9>  Set AI touch sensitivity level");
     println!("  --ble-scan         Scan for Clevetura BLE devices");
     println!("  --version, -v      Show version information");
     println!("  --help, -h         Show this help message");
