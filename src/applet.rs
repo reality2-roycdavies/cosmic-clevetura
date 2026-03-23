@@ -9,22 +9,28 @@ use cosmic::Element;
 
 use crate::config::Config;
 use crate::keyboard::{self, KeyboardMode, KeyboardState};
+use crate::proto;
 
 const APP_ID: &str = "io.github.reality2_roycdavies.cosmic-clevetura";
 
 enum KeyboardCommand {
-    Refresh,
+    SetSensitivity(u32),
 }
 
 #[derive(Debug)]
 enum KeyboardEvent {
-    StateUpdate(KeyboardState),
+    StateUpdate {
+        hw_state: KeyboardState,
+        ai_level: Option<u32>,
+        battery_from_heartbeat: Option<proto::HeartBeatBattery>,
+    },
+    SettingsResult(Result<(), String>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     PollStatus,
-    SetSensitivity(u8),
+    SetSensitivity(u32),
     OpenSettings,
     PopupClosed(Id),
     Surface(cosmic::surface::Action),
@@ -35,6 +41,10 @@ pub struct CleveturaApplet {
     popup: Option<Id>,
     state: KeyboardState,
     config: Config,
+    /// AI sensitivity level from firmware (None if not yet read).
+    firmware_ai_level: Option<u32>,
+    /// Battery info from heartbeat.
+    heartbeat_battery: Option<proto::HeartBeatBattery>,
     cmd_tx: std::sync::mpsc::Sender<KeyboardCommand>,
     event_rx: std::sync::mpsc::Receiver<KeyboardEvent>,
 }
@@ -71,6 +81,8 @@ impl cosmic::Application for CleveturaApplet {
             popup: None,
             state: KeyboardState::default(),
             config,
+            firmware_ai_level: None,
+            heartbeat_battery: None,
             cmd_tx,
             event_rx,
         };
@@ -87,8 +99,23 @@ impl cosmic::Application for CleveturaApplet {
             Message::PollStatus => {
                 while let Ok(event) = self.event_rx.try_recv() {
                     match event {
-                        KeyboardEvent::StateUpdate(new_state) => {
-                            self.state = new_state;
+                        KeyboardEvent::StateUpdate {
+                            hw_state,
+                            ai_level,
+                            battery_from_heartbeat,
+                        } => {
+                            self.state = hw_state;
+                            if let Some(level) = ai_level {
+                                self.firmware_ai_level = Some(level);
+                            }
+                            if let Some(batt) = battery_from_heartbeat {
+                                self.heartbeat_battery = Some(batt);
+                            }
+                        }
+                        KeyboardEvent::SettingsResult(result) => {
+                            if let Err(e) = result {
+                                eprintln!("Settings update failed: {e}");
+                            }
                         }
                     }
                 }
@@ -96,9 +123,8 @@ impl cosmic::Application for CleveturaApplet {
             }
 
             Message::SetSensitivity(level) => {
-                // Sensitivity is software-side only — save to config
-                self.config.sensitivity = level;
-                let _ = self.config.save();
+                self.firmware_ai_level = Some(level);
+                let _ = self.cmd_tx.send(KeyboardCommand::SetSensitivity(level));
             }
 
             Message::PopupClosed(id) => {
@@ -154,7 +180,7 @@ impl cosmic::Application for CleveturaApplet {
                 (fg.blue * 255.0) as u8,
             );
 
-            let svg_data = keyboard_icon_svg(&color, true, &self.state.mode);
+            let svg_data = keyboard_icon_svg(&color, &self.state.mode);
             let handle = svg::Handle::from_memory(svg_data.into_bytes());
             cosmic::iced::widget::svg(handle)
                 .width(Length::Fixed(icon_size))
@@ -239,6 +265,22 @@ impl cosmic::Application for CleveturaApplet {
 }
 
 impl CleveturaApplet {
+    /// Current AI sensitivity level (prefer firmware value over config).
+    fn current_sensitivity(&self) -> u32 {
+        self.firmware_ai_level
+            .unwrap_or(self.config.sensitivity as u32)
+    }
+
+    /// Battery percentage from the best available source.
+    fn battery_percent(&self) -> Option<i32> {
+        // Prefer heartbeat battery (more current), fall back to firmware query
+        if let Some(ref hb) = self.heartbeat_battery {
+            Some(hb.level)
+        } else {
+            self.state.battery_percent.map(|b| b as i32)
+        }
+    }
+
     fn popup_content(&self) -> widget::Column<'_, Message> {
         use cosmic::iced::widget::{column, container, row, Space};
         use cosmic::iced::{Alignment, Color};
@@ -255,11 +297,16 @@ impl CleveturaApplet {
             let mut info = column![].spacing(2);
 
             // Battery
-            if let Some(batt) = self.state.battery_percent {
-                if batt >= 0 {
+            if let Some(batt) = self.battery_percent() {
+                let charging = self
+                    .heartbeat_battery
+                    .as_ref()
+                    .map(|hb| hb.charging)
+                    .unwrap_or(false);
+                if charging {
+                    info = info.push(text::body(format!("Battery: {}% (charging)", batt)));
+                } else if batt >= 0 {
                     info = info.push(text::body(format!("Battery: {}%", batt)));
-                } else {
-                    info = info.push(text::body("Battery: Charging"));
                 }
             }
 
@@ -268,39 +315,36 @@ impl CleveturaApplet {
                 info = info.push(text::caption(format!("Firmware: {fw}")));
             }
 
-            // Serial
-            if let Some(ref serial) = self.state.serial_number {
-                info = info.push(text::caption(format!("Serial: {serial}")));
-            }
-
             info
         } else {
-            column![text::body("Disconnected"),
+            column![
+                text::body("Disconnected"),
                 text::caption("Connect your Clevetura keyboard via USB or Bluetooth"),
             ]
             .spacing(2)
         };
 
-        // Sensitivity control (software-side)
-        let sensitivity_label = format!("Touch Sensitivity: {}/9", self.config.sensitivity);
+        // Sensitivity control (reads from firmware)
+        let ai_level = self.current_sensitivity();
+        let sensitivity_label = format!("Touch Sensitivity: {}/9", ai_level);
         let mut sensitivity_row =
             row![text::body(sensitivity_label), Space::new().width(Length::Fill),]
                 .spacing(4)
                 .align_y(Alignment::Center);
 
-        let can_decrease = self.config.sensitivity > 1;
+        let can_decrease = ai_level > 1 && self.state.connected;
         let minus_btn: Element<Message> = if can_decrease {
             widget::button::standard("-")
-                .on_press(Message::SetSensitivity(self.config.sensitivity - 1))
+                .on_press(Message::SetSensitivity(ai_level - 1))
                 .into()
         } else {
             widget::button::standard("-").into()
         };
 
-        let can_increase = self.config.sensitivity < 9;
+        let can_increase = ai_level < 9 && self.state.connected;
         let plus_btn: Element<Message> = if can_increase {
             widget::button::standard("+")
-                .on_press(Message::SetSensitivity(self.config.sensitivity + 1))
+                .on_press(Message::SetSensitivity(ai_level + 1))
                 .into()
         } else {
             widget::button::standard("+").into()
@@ -308,22 +352,8 @@ impl CleveturaApplet {
 
         sensitivity_row = sensitivity_row.push(minus_btn).push(plus_btn);
 
-        // Slider config info
-        let left_slider_text = format!("Left slider: {}", self.config.left_slider);
-        let right_slider_text = format!("Right slider: {}", self.config.right_slider);
-        let slider_section =
-            column![text::caption(left_slider_text), text::caption(right_slider_text),].spacing(2);
-
-        // Profiles status
-        let profiles_text = if self.config.profiles_enabled {
-            format!("Profiles: {} configured", self.config.profiles.len())
-        } else {
-            "Profiles: Disabled".to_string()
-        };
-
         // Settings button
         let settings_row = row![
-            text::caption(profiles_text),
             Space::new().width(Length::Fill),
             widget::button::standard("Settings...").on_press(Message::OpenSettings),
         ]
@@ -351,8 +381,6 @@ impl CleveturaApplet {
             divider(),
             sensitivity_row,
             divider(),
-            slider_section,
-            divider(),
             settings_row,
         ]
         .spacing(8)
@@ -364,24 +392,83 @@ async fn run_background(
     cmd_rx: std::sync::mpsc::Receiver<KeyboardCommand>,
     event_tx: std::sync::mpsc::Sender<KeyboardEvent>,
 ) {
+    let mut authorized = false;
+
     loop {
         // Process commands from UI
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                KeyboardCommand::Refresh => {}
+                KeyboardCommand::SetSensitivity(level) => {
+                    let result = (|| -> Result<(), String> {
+                        let conn = keyboard::KeyboardConnection::open()?;
+                        if !authorized {
+                            conn.authorize()?;
+                            authorized = true;
+                        }
+                        let settings = proto::AppSettings {
+                            global: Some(proto::GlobalSettings {
+                                current_ai_level: Some(level),
+                                ..Default::default()
+                            }),
+                            global_profile: None,
+                            counter: None,
+                        };
+                        proto::set_settings(conn.device(), settings)
+                    })();
+                    let _ = event_tx.send(KeyboardEvent::SettingsResult(result));
+                }
             }
         }
 
         // Poll keyboard state
-        let state = keyboard::poll_state();
-        let _ = event_tx.send(KeyboardEvent::StateUpdate(state));
+        let mut ai_level = None;
+        let mut battery_hb = None;
+
+        let hw_state = match keyboard::KeyboardConnection::open() {
+            Ok(conn) => {
+                if !authorized {
+                    if conn.authorize().is_ok() {
+                        authorized = true;
+                    }
+                }
+
+                let state = conn.read_state();
+
+                // Read firmware settings for AI level
+                if authorized {
+                    if let Ok(settings) = proto::get_settings(conn.device()) {
+                        ai_level = settings
+                            .global
+                            .as_ref()
+                            .and_then(|g| g.current_ai_level);
+                    }
+
+                    // Send heartbeat (gets battery info including charging state)
+                    if let Ok(batt) = proto::heartbeat(conn.device(), 0) {
+                        battery_hb = batt;
+                    }
+                }
+
+                state
+            }
+            Err(_) => {
+                authorized = false;
+                KeyboardState::default()
+            }
+        };
+
+        let _ = event_tx.send(KeyboardEvent::StateUpdate {
+            hw_state,
+            ai_level,
+            battery_from_heartbeat: battery_hb,
+        });
 
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 }
 
 /// Generate a TouchOnKeys shield SVG icon with theme color.
-fn keyboard_icon_svg(color: &str, _connected: bool, mode: &KeyboardMode) -> String {
+fn keyboard_icon_svg(color: &str, mode: &KeyboardMode) -> String {
     let wave2 = match mode {
         KeyboardMode::Touch => format!(
             r#"<path d="M4 10.5C5.2 9 6.2 8.2 8 8.2C9.8 8.2 10.8 9 12 10.5" fill="none" stroke="{color}" stroke-width="0.8" stroke-linecap="round" opacity="0.6"/>"#

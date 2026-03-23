@@ -543,7 +543,11 @@ pub fn set_settings(device: &HidDevice, settings: AppSettings) -> Result<(), Str
 
     let response = send_proto_request(device, &request)?;
 
-    if let Some(set_resp) = response.set_settings {
+    if let Some(bad) = &response.bad_request {
+        return Err(format!("Bad request error: {}", bad.error));
+    }
+
+    if let Some(set_resp) = &response.set_settings {
         if set_resp.status != 0 {
             return Err(format!("SetSettings failed with status {}", set_resp.status));
         }

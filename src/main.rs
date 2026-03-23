@@ -58,17 +58,19 @@ fn main() -> cosmic::iced::Result {
                 match keyboard::KeyboardConnection::open() {
                     Ok(conn) => {
                         conn.authorize().ok();
-                        // Get current settings first
-                        match proto::get_settings(conn.device()) {
-                            Ok(mut settings) => {
-                                let global = settings.global.get_or_insert_with(Default::default);
-                                global.current_ai_level = Some(level);
-                                match proto::set_settings(conn.device(), settings) {
-                                    Ok(()) => println!("Sensitivity set to {level}"),
-                                    Err(e) => eprintln!("Failed to set sensitivity: {e}"),
-                                }
-                            }
-                            Err(e) => eprintln!("Failed to get current settings: {e}"),
+                        // Send only the global settings with changed field
+                        // (matching how the TouchOnKeys app does it)
+                        let settings = proto::AppSettings {
+                            global: Some(proto::GlobalSettings {
+                                current_ai_level: Some(level),
+                                ..Default::default()
+                            }),
+                            global_profile: None,
+                            counter: None,
+                        };
+                        match proto::set_settings(conn.device(), settings) {
+                            Ok(()) => println!("Sensitivity set to {level}"),
+                            Err(e) => eprintln!("Failed to set sensitivity: {e}"),
                         }
                     }
                     Err(e) => eprintln!("Could not open keyboard: {e}"),
