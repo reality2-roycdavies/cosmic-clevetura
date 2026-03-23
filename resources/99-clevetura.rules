@@ -1,0 +1,2 @@
+# Clevetura CLVX S keyboard — allow unprivileged HID access for configuration
+KERNEL=="hidraw*", ATTRS{idVendor}=="36f7", ATTRS{idProduct}=="5755", MODE="0660", GROUP="plugdev", TAG+="uaccess", TAG+="udev-acl"

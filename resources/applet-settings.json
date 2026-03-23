@@ -1,0 +1,6 @@
+{
+    "name": "Clevetura TouchOnKeys",
+    "icon": "io.github.reality2_roycdavies.cosmic-clevetura-symbolic",
+    "applet_id": "io.github.reality2_roycdavies.cosmic-clevetura",
+    "settings_cmd": "cosmic-clevetura --settings-standalone"
+}

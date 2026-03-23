@@ -1,0 +1,51 @@
+[package]
+name = "cosmic-clevetura"
+version = "0.1.0"
+edition = "2021"
+authors = ["Roy C. Davies"]
+license = "MIT"
+description = "Clevetura TouchOnKeys configuration applet for COSMIC desktop"
+keywords = ["cosmic-desktop", "clevetura", "keyboard", "touchpad", "cosmic-applet"]
+categories = ["gui", "hardware-support"]
+repository = "https://github.com/reality2-roycdavies/cosmic-clevetura"
+homepage = "https://github.com/reality2-roycdavies/cosmic-clevetura"
+
+[lib]
+name = "cosmic_clevetura"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cosmic-clevetura"
+path = "src/main.rs"
+
+[dependencies]
+# COSMIC GUI toolkit (applet mode for panel integration)
+libcosmic = { git = "https://github.com/pop-os/libcosmic.git", default-features = false, features = [
+    "applet",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# JSON parsing for config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# File path helpers
+dirs = "6"
+
+# HID device communication
+hidapi = "2"
+
+# BLE device communication
+btleplug = "0.11"
+
+# Futures for BLE async streams
+futures = "0.3"
+
+# UUID parsing for BLE service/characteristic UUIDs
+uuid = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
