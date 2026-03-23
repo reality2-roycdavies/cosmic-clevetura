@@ -238,7 +238,15 @@ impl BleConnection {
         Ok(response[1..].to_vec())
     }
 
-    /// Send a protobuf request (Layer 2) and receive protobuf response.
+    /// Send a protobuf request (Layer 2) with CRC and receive protobuf response.
+    ///
+    /// BLE uses the CRC variant:
+    /// 1. Protobuf encode → raw bytes
+    /// 2. CRC32 of raw bytes → 4 bytes little-endian
+    /// 3. Concat: [raw_bytes, crc32_bytes]
+    /// 4. Base64 encode
+    /// 5. Prepend byte 0x23 (35)
+    /// 6. Send via BLE write (chunked with end-byte)
     pub async fn send_proto_request(
         &self,
         request: &proto::Request,
@@ -246,26 +254,67 @@ impl BleConnection {
         // 1. Encode protobuf
         let proto_bytes = request.encode_to_vec();
 
-        // 2. Base64 encode
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&proto_bytes);
+        // 2. CRC32 (little-endian)
+        let crc = crc32fast::hash(&proto_bytes);
+        let crc_bytes = crc.to_le_bytes();
 
-        // 3. Send as raw bytes (send_raw handles chunking + end-byte)
-        let response_data = self.send_raw(b64.as_bytes()).await?;
+        // 3. Concat proto + CRC
+        let mut with_crc = proto_bytes.clone();
+        with_crc.extend_from_slice(&crc_bytes);
+
+        // 4. Base64 encode
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&with_crc);
+
+        // 5. Prepend 0x23 and send
+        let mut payload = vec![0x23u8];
+        payload.extend_from_slice(b64.as_bytes());
+
+        let response_data = self.send_raw(&payload).await?;
 
         if response_data.is_empty() {
             return Err("Empty protobuf response".to_string());
         }
 
-        // 4. Base64 decode
-        let b64_str = std::str::from_utf8(&response_data)
+        // Response parsing:
+        // The response may have a leading 0x23 byte, then base64 data with CRC
+        let data = if response_data[0] == 0x23 {
+            &response_data[1..]
+        } else {
+            &response_data[..]
+        };
+
+        // Strip null bytes
+        let clean: Vec<u8> = data.iter().copied().filter(|&b| b > 0 && b < 128).collect();
+
+        let b64_str = std::str::from_utf8(&clean)
             .map_err(|e| format!("Invalid UTF-8: {e}"))?;
 
-        let proto_bytes = base64::engine::general_purpose::STANDARD
+        let decoded = base64::engine::general_purpose::STANDARD
             .decode(b64_str)
             .map_err(|e| format!("Base64 decode failed: {e}"))?;
 
-        // 5. Decode protobuf
-        proto::Response::decode(proto_bytes.as_slice())
+        // Last 4 bytes are CRC32 — strip them if present (response is at least 5 bytes)
+        let proto_data = if decoded.len() > 4 {
+            // Verify CRC
+            let payload_end = decoded.len() - 4;
+            let response_crc = u32::from_le_bytes([
+                decoded[payload_end],
+                decoded[payload_end + 1],
+                decoded[payload_end + 2],
+                decoded[payload_end + 3],
+            ]);
+            let computed_crc = crc32fast::hash(&decoded[..payload_end]);
+            if response_crc == computed_crc {
+                &decoded[..payload_end]
+            } else {
+                // CRC mismatch — try decoding the full data (might not have CRC)
+                &decoded[..]
+            }
+        } else {
+            &decoded[..]
+        };
+
+        proto::Response::decode(proto_data)
             .map_err(|e| format!("Protobuf decode failed: {e}"))
     }
 

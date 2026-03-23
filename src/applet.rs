@@ -23,6 +23,7 @@ enum KeyboardEvent {
         hw_state: KeyboardState,
         ai_level: Option<u32>,
         battery_from_heartbeat: Option<proto::HeartBeatBattery>,
+        connection_type: &'static str,
     },
     SettingsResult(Result<(), String>),
 }
@@ -45,6 +46,8 @@ pub struct CleveturaApplet {
     firmware_ai_level: Option<u32>,
     /// Battery info from heartbeat.
     heartbeat_battery: Option<proto::HeartBeatBattery>,
+    /// Current connection type for display.
+    connection_type: &'static str,
     cmd_tx: std::sync::mpsc::Sender<KeyboardCommand>,
     event_rx: std::sync::mpsc::Receiver<KeyboardEvent>,
 }
@@ -83,6 +86,7 @@ impl cosmic::Application for CleveturaApplet {
             config,
             firmware_ai_level: None,
             heartbeat_battery: None,
+            connection_type: "",
             cmd_tx,
             event_rx,
         };
@@ -103,8 +107,10 @@ impl cosmic::Application for CleveturaApplet {
                             hw_state,
                             ai_level,
                             battery_from_heartbeat,
+                            connection_type,
                         } => {
                             self.state = hw_state;
+                            self.connection_type = connection_type;
                             if let Some(level) = ai_level {
                                 self.firmware_ai_level = Some(level);
                             }
@@ -296,6 +302,11 @@ impl CleveturaApplet {
         let info_section = if self.state.connected {
             let mut info = column![].spacing(2);
 
+            // Connection type
+            if !self.connection_type.is_empty() {
+                info = info.push(text::body(format!("Connected via {}", self.connection_type)));
+            }
+
             // Battery
             if let Some(batt) = self.battery_percent() {
                 let charging = self
@@ -388,79 +399,161 @@ impl CleveturaApplet {
     }
 }
 
+/// Connection type tracking for the background thread.
+enum ConnectionMode {
+    None,
+    Usb { authorized: bool },
+    Ble { address: String },
+}
+
 async fn run_background(
     cmd_rx: std::sync::mpsc::Receiver<KeyboardCommand>,
     event_tx: std::sync::mpsc::Sender<KeyboardEvent>,
 ) {
-    let mut authorized = false;
+    let mut mode = ConnectionMode::None;
+    let mut ble_conn: Option<crate::ble::BleConnection> = None;
 
     loop {
         // Process commands from UI
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 KeyboardCommand::SetSensitivity(level) => {
-                    let result = (|| -> Result<(), String> {
-                        let conn = keyboard::KeyboardConnection::open()?;
-                        if !authorized {
-                            conn.authorize()?;
-                            authorized = true;
+                    let settings = proto::AppSettings {
+                        global: Some(proto::GlobalSettings {
+                            current_ai_level: Some(level),
+                            ..Default::default()
+                        }),
+                        global_profile: None,
+                        counter: None,
+                    };
+
+                    let result = match &mode {
+                        ConnectionMode::Usb { authorized: true } => {
+                            match keyboard::KeyboardConnection::open() {
+                                Ok(conn) => proto::set_settings(conn.device(), settings),
+                                Err(e) => Err(e),
+                            }
                         }
-                        let settings = proto::AppSettings {
-                            global: Some(proto::GlobalSettings {
-                                current_ai_level: Some(level),
-                                ..Default::default()
-                            }),
-                            global_profile: None,
-                            counter: None,
-                        };
-                        proto::set_settings(conn.device(), settings)
-                    })();
+                        ConnectionMode::Ble { .. } => {
+                            if let Some(ref conn) = ble_conn {
+                                conn.set_settings(settings).await
+                            } else {
+                                Err("BLE not connected".to_string())
+                            }
+                        }
+                        _ => Err("Not connected".to_string()),
+                    };
                     let _ = event_tx.send(KeyboardEvent::SettingsResult(result));
                 }
             }
         }
 
-        // Poll keyboard state
+        // Poll keyboard state — try USB first, then BLE
         let mut ai_level = None;
         let mut battery_hb = None;
 
         let hw_state = match keyboard::KeyboardConnection::open() {
             Ok(conn) => {
+                // USB connected
+                let authorized = matches!(mode, ConnectionMode::Usb { authorized: true });
                 if !authorized {
                     if conn.authorize().is_ok() {
-                        authorized = true;
+                        mode = ConnectionMode::Usb { authorized: true };
+                    } else {
+                        mode = ConnectionMode::Usb { authorized: false };
                     }
                 }
 
                 let state = conn.read_state();
 
-                // Read firmware settings for AI level
-                if authorized {
+                if matches!(mode, ConnectionMode::Usb { authorized: true }) {
                     if let Ok(settings) = proto::get_settings(conn.device()) {
                         ai_level = settings
                             .global
                             .as_ref()
                             .and_then(|g| g.current_ai_level);
                     }
-
-                    // Send heartbeat (gets battery info including charging state)
                     if let Ok(batt) = proto::heartbeat(conn.device(), 0) {
                         battery_hb = batt;
                     }
                 }
 
+                // Drop any BLE connection when USB is available
+                if ble_conn.is_some() {
+                    if let Some(ref conn) = ble_conn {
+                        let _ = conn.disconnect().await;
+                    }
+                    ble_conn = None;
+                }
+
                 state
             }
             Err(_) => {
-                authorized = false;
-                KeyboardState::default()
+                // No USB — try BLE only if we have a saved BLE address
+                // (BLE scanning is done manually via settings, not automatically)
+                if ble_conn.is_none() {
+                    let config = crate::config::Config::load();
+                    if let Some(ref addr) = config.ble_address {
+                        if let Ok(conn) =
+                            crate::ble::BleConnection::connect_by_address(addr).await
+                        {
+                            mode = ConnectionMode::Ble {
+                                address: addr.clone(),
+                            };
+                            ble_conn = Some(conn);
+                        }
+                    }
+                }
+
+                // Try reading from BLE connection
+                if let Some(ref conn) = ble_conn {
+                    match conn.get_settings().await {
+                        Ok(settings) => {
+                            ai_level = settings
+                                .global
+                                .as_ref()
+                                .and_then(|g| g.current_ai_level);
+
+                            // Try heartbeat for battery
+                            if let Ok(batt) = conn.heartbeat(0).await {
+                                battery_hb = batt;
+                            }
+
+                            KeyboardState {
+                                connected: true,
+                                battery_percent: None,
+                                firmware_version: None,
+                                protocol_version: None,
+                                serial_number: None,
+                                mode: KeyboardMode::Unknown,
+                            }
+                        }
+                        Err(_) => {
+                            // BLE connection lost
+                            let _ = conn.disconnect().await;
+                            ble_conn = None;
+                            mode = ConnectionMode::None;
+                            KeyboardState::default()
+                        }
+                    }
+                } else {
+                    mode = ConnectionMode::None;
+                    KeyboardState::default()
+                }
             }
+        };
+
+        let conn_type = match &mode {
+            ConnectionMode::Usb { .. } if hw_state.connected => "USB",
+            ConnectionMode::Ble { .. } if hw_state.connected => "Bluetooth",
+            _ => "",
         };
 
         let _ = event_tx.send(KeyboardEvent::StateUpdate {
             hw_state,
             ai_level,
             battery_from_heartbeat: battery_hb,
+            connection_type: conn_type,
         });
 
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;

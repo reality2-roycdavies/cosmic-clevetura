@@ -76,6 +76,8 @@ pub struct Config {
     pub profiles: Vec<AppProfile>,
     /// Whether per-app profile switching is enabled.
     pub profiles_enabled: bool,
+    /// Saved BLE device address for auto-connect when USB is not available.
+    pub ble_address: Option<String>,
 }
 
 impl Default for Config {
@@ -86,6 +88,7 @@ impl Default for Config {
             right_slider: SliderAction::Volume,
             profiles: Vec::new(),
             profiles_enabled: false,
+            ble_address: None,
         }
     }
 }

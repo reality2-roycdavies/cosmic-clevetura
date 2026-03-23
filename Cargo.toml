@@ -43,6 +43,9 @@ prost = "0.13"
 # Base64 encoding for protobuf-over-HID transport
 base64 = "0.22"
 
+# CRC32 for BLE protobuf transport
+crc32fast = "1"
+
 # BLE device communication
 btleplug = "0.11"
 
