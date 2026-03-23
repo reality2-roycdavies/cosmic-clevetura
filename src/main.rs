@@ -96,6 +96,33 @@ fn main() -> cosmic::iced::Result {
                 });
                 Ok(())
             }
+            "--ble-info" => {
+                let address = if args.len() >= 3 {
+                    args[2].clone()
+                } else {
+                    // Auto-discover first BLE device
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let addr = rt.block_on(async {
+                        println!("Scanning for Clevetura BLE devices (3 seconds)...");
+                        match ble::scan_devices(std::time::Duration::from_secs(3)).await {
+                            Ok(devices) if !devices.is_empty() => {
+                                Some(devices[0].address.clone())
+                            }
+                            _ => None,
+                        }
+                    });
+                    match addr {
+                        Some(a) => a,
+                        None => {
+                            eprintln!("No Clevetura BLE devices found. Use --ble-info <address>");
+                            std::process::exit(1);
+                        }
+                    }
+                };
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(ble::print_ble_info(&address));
+                Ok(())
+            }
             "--help" | "-h" => {
                 print_help(&args[0]);
                 Ok(())
@@ -162,6 +189,7 @@ fn print_help(program: &str) {
     println!("  --get-settings     Read current settings from keyboard firmware");
     println!("  --set-sensitivity <1-9>  Set AI touch sensitivity level");
     println!("  --ble-scan         Scan for Clevetura BLE devices");
+    println!("  --ble-info [addr]  Read device info over BLE");
     println!("  --version, -v      Show version information");
     println!("  --help, -h         Show this help message");
     println!();
