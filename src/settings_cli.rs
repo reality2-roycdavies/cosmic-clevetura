@@ -18,7 +18,7 @@ pub fn describe() {
 
     let schema = serde_json::json!({
         "title": "Clevetura TouchOnKeys Settings",
-        "description": "Configure your Clevetura keyboard's touch sensitivity and sliders.",
+        "description": "Configure your Clevetura keyboard's touch sensitivity, gestures, and hardware settings.",
         "sections": [
             {
                 "title": "Touch Sensitivity",
@@ -30,6 +30,99 @@ pub fn describe() {
                         "value": config.sensitivity,
                         "min": 1,
                         "max": 9
+                    }
+                ]
+            },
+            {
+                "title": "Touch Behaviour",
+                "items": [
+                    {
+                        "type": "toggle",
+                        "key": "tap_1f",
+                        "label": "Single-finger tap",
+                        "value": config.tap_1f
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "tap_2f",
+                        "label": "Two-finger tap (right-click)",
+                        "value": config.tap_2f
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "hold_gesture",
+                        "label": "Hold gesture",
+                        "value": config.hold_gesture
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "swap_clicks",
+                        "label": "Swap click buttons (left/right)",
+                        "value": config.swap_clicks
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "touch_after_liftoff",
+                        "label": "Touch activation after lift-off",
+                        "value": config.touch_after_liftoff
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "newbie_mode",
+                        "label": "Newbie mode (simplified touch)",
+                        "value": config.newbie_mode
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "key_suppressor",
+                        "label": "Key suppressor (prevent accidental keys during touch)",
+                        "value": config.key_suppressor
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "hold_delay_on_border",
+                        "label": "Hold delay on border",
+                        "value": config.hold_delay_on_border
+                    }
+                ]
+            },
+            {
+                "title": "Keyboard",
+                "items": [
+                    {
+                        "type": "toggle",
+                        "key": "fn_lock",
+                        "label": "Fn Lock (Fn key always active)",
+                        "value": config.fn_lock
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "left_handed",
+                        "label": "Left-handed mode",
+                        "value": config.left_handed
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "swap_fn_ctrl",
+                        "label": "Swap Fn and Ctrl keys",
+                        "value": config.swap_fn_ctrl
+                    }
+                ]
+            },
+            {
+                "title": "Hardware",
+                "items": [
+                    {
+                        "type": "toggle",
+                        "key": "auto_brightness",
+                        "label": "Auto brightness",
+                        "value": config.auto_brightness
+                    },
+                    {
+                        "type": "toggle",
+                        "key": "battery_saving",
+                        "label": "Battery saving mode",
+                        "value": config.battery_saving
                     }
                 ]
             },
@@ -85,26 +178,33 @@ pub fn set(key: &str, value: &str) {
             Err(e) => Err(format!("Invalid number: {e}")),
         },
         "left_slider" => match cli_to_slider_action(value) {
-            Ok(action) => {
-                config.left_slider = action;
-                Ok("Updated left slider")
-            }
+            Ok(action) => { config.left_slider = action; Ok("Updated left slider") }
             Err(e) => Err(e),
         },
         "right_slider" => match cli_to_slider_action(value) {
-            Ok(action) => {
-                config.right_slider = action;
-                Ok("Updated right slider")
-            }
+            Ok(action) => { config.right_slider = action; Ok("Updated right slider") }
             Err(e) => Err(e),
         },
         "profiles_enabled" => match serde_json::from_str::<bool>(value) {
-            Ok(enabled) => {
-                config.profiles_enabled = enabled;
-                Ok("Updated profiles setting")
-            }
+            Ok(v) => { config.profiles_enabled = v; Ok("Updated profiles setting") }
             Err(e) => Err(format!("Invalid boolean: {e}")),
         },
+        // Touch behaviour toggles
+        "tap_1f" => set_bool(&mut config.tap_1f, value, "tap_1f"),
+        "tap_2f" => set_bool(&mut config.tap_2f, value, "tap_2f"),
+        "hold_gesture" => set_bool(&mut config.hold_gesture, value, "hold_gesture"),
+        "swap_clicks" => set_bool(&mut config.swap_clicks, value, "swap_clicks"),
+        "touch_after_liftoff" => set_bool(&mut config.touch_after_liftoff, value, "touch_after_liftoff"),
+        "newbie_mode" => set_bool(&mut config.newbie_mode, value, "newbie_mode"),
+        "key_suppressor" => set_bool(&mut config.key_suppressor, value, "key_suppressor"),
+        "hold_delay_on_border" => set_bool(&mut config.hold_delay_on_border, value, "hold_delay_on_border"),
+        // Keyboard toggles
+        "fn_lock" => set_bool(&mut config.fn_lock, value, "fn_lock"),
+        "left_handed" => set_bool(&mut config.left_handed, value, "left_handed"),
+        "swap_fn_ctrl" => set_bool(&mut config.swap_fn_ctrl, value, "swap_fn_ctrl"),
+        // Hardware toggles
+        "auto_brightness" => set_bool(&mut config.auto_brightness, value, "auto_brightness"),
+        "battery_saving" => set_bool(&mut config.battery_saving, value, "battery_saving"),
         _ => Err(format!("Unknown key: {key}")),
     };
 
@@ -127,6 +227,16 @@ pub fn action(id: &str) {
             }
         }
         _ => print_response(false, &format!("Unknown action: {id}")),
+    }
+}
+
+fn set_bool<'a>(field: &mut bool, value: &str, name: &str) -> Result<&'a str, String> {
+    match serde_json::from_str::<bool>(value) {
+        Ok(v) => {
+            *field = v;
+            Ok("Updated")
+        }
+        Err(e) => Err(format!("Invalid boolean for {name}: {e}")),
     }
 }
 

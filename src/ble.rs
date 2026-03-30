@@ -121,11 +121,25 @@ pub async fn scan_devices(scan_duration: Duration) -> Result<Vec<BleDeviceInfo>,
 
 impl BleConnection {
     /// Connect to a Clevetura keyboard over BLE by address.
+    ///
+    /// Performs a short scan first so the adapter knows about the peripheral.
     pub async fn connect_by_address(address: &str) -> Result<Self, String> {
         let adapter = get_adapter().await?;
 
         let char_uuid =
             Uuid::parse_str(CHAR_UUID).map_err(|e| format!("Invalid UUID: {e}"))?;
+        let service_uuid =
+            Uuid::parse_str(SERVICE_UUID).map_err(|e| format!("Invalid service UUID: {e}"))?;
+
+        // Scan briefly so the adapter discovers the peripheral
+        adapter
+            .start_scan(ScanFilter {
+                services: vec![service_uuid],
+            })
+            .await
+            .map_err(|e| format!("BLE scan failed: {e}"))?;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        adapter.stop_scan().await.ok();
 
         let peripherals = adapter
             .peripherals()
@@ -181,6 +195,13 @@ impl BleConnection {
 
     /// Send raw bytes and receive raw response (Layer 1 — firmware commands).
     async fn send_raw(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+        // Set up notification stream BEFORE writing so we don't miss the response
+        let mut stream = self
+            .peripheral
+            .notifications()
+            .await
+            .map_err(|e| format!("Failed to get notifications: {e}"))?;
+
         // Append end-byte and chunk
         let mut payload = data.to_vec();
         payload.push(END_BYTE);
@@ -191,13 +212,6 @@ impl BleConnection {
                 .await
                 .map_err(|e| format!("BLE write failed: {e}"))?;
         }
-
-        // Read response via notifications
-        let mut stream = self
-            .peripheral
-            .notifications()
-            .await
-            .map_err(|e| format!("Failed to get notifications: {e}"))?;
 
         let mut response_data = Vec::new();
 

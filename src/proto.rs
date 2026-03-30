@@ -64,7 +64,25 @@ pub struct Request {
     pub get_profile_settings: Option<GetProfileSettingsRequest>,
     #[prost(message, optional, tag = "10")]
     pub set_os_mode: Option<SetOsModeRequest>,
+    /// ControlAi — enable/disable AI touch processing.
+    #[prost(message, optional, tag = "8")]
+    pub control_ai: Option<ControlAiRequest>,
+    /// GetAiState — query current AI state.
+    #[prost(message, optional, tag = "9")]
+    pub get_ai_state: Option<GetAiStateRequest>,
 }
+
+/// Control AI touch processing mode.
+#[derive(Clone, PartialEq, Message)]
+pub struct ControlAiRequest {
+    /// 0 = disable AI (standard HID touchpad), 1 = enable AI (raw touch data for app).
+    #[prost(int32, tag = "1")]
+    pub mode: i32,
+}
+
+/// Get current AI processing state.
+#[derive(Clone, PartialEq, Message)]
+pub struct GetAiStateRequest {}
 
 /// Top-level Response message.
 #[derive(Clone, PartialEq, Message)]
@@ -81,6 +99,16 @@ pub struct Response {
     pub bad_request: Option<BadRequestResponse>,
     #[prost(message, optional, tag = "8")]
     pub get_profile_settings: Option<GetProfileSettingsResponse>,
+    #[prost(message, optional, tag = "9")]
+    pub get_ai_state: Option<GetAiStateResponse>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct GetAiStateResponse {
+    #[prost(int32, optional, tag = "1")]
+    pub mode: Option<i32>,
+    #[prost(bool, optional, tag = "2")]
+    pub active: Option<bool>,
 }
 
 // ── Sub-messages ──
@@ -648,5 +676,12 @@ pub fn print_settings(device: &HidDevice) {
         Err(e) => {
             eprintln!("Failed to get settings: {e}");
         }
+    }
+
+    // Also dump raw protobuf debug for all fields.
+    println!("\nRaw settings debug:");
+    match get_settings(device) {
+        Ok(settings) => println!("{:#?}", settings),
+        Err(e) => eprintln!("Raw dump failed: {e}"),
     }
 }

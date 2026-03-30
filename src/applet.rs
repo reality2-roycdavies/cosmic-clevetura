@@ -15,6 +15,7 @@ const APP_ID: &str = "io.github.reality2_roycdavies.cosmic-clevetura";
 
 enum KeyboardCommand {
     SetSensitivity(u32),
+    SetGlobalSettings(proto::GlobalSettings),
 }
 
 #[derive(Debug)]
@@ -22,6 +23,7 @@ enum KeyboardEvent {
     StateUpdate {
         hw_state: KeyboardState,
         ai_level: Option<u32>,
+        firmware_settings: Option<proto::GlobalSettings>,
         battery_from_heartbeat: Option<proto::HeartBeatBattery>,
         connection_type: &'static str,
     },
@@ -106,6 +108,7 @@ impl cosmic::Application for CleveturaApplet {
                         KeyboardEvent::StateUpdate {
                             hw_state,
                             ai_level,
+                            firmware_settings,
                             battery_from_heartbeat,
                             connection_type,
                         } => {
@@ -113,6 +116,9 @@ impl cosmic::Application for CleveturaApplet {
                             self.connection_type = connection_type;
                             if let Some(level) = ai_level {
                                 self.firmware_ai_level = Some(level);
+                            }
+                            if let Some(ref global) = firmware_settings {
+                                self.config.update_from_firmware(global);
                             }
                             if let Some(batt) = battery_from_heartbeat {
                                 self.heartbeat_battery = Some(batt);
@@ -125,7 +131,15 @@ impl cosmic::Application for CleveturaApplet {
                         }
                     }
                 }
-                self.config = Config::load();
+                // Reload config from disk (settings page may have changed it).
+                let new_config = Config::load();
+                // If firmware-relevant settings changed, push to keyboard.
+                if self.state.connected && new_config.to_global_settings() != self.config.to_global_settings() {
+                    let _ = self.cmd_tx.send(KeyboardCommand::SetGlobalSettings(
+                        new_config.to_global_settings(),
+                    ));
+                }
+                self.config = new_config;
             }
 
             Message::SetSensitivity(level) => {
@@ -406,6 +420,30 @@ enum ConnectionMode {
     Ble { address: String },
 }
 
+/// Send settings to the keyboard via whichever transport is active.
+async fn send_settings(
+    mode: &ConnectionMode,
+    ble_conn: &Option<crate::ble::BleConnection>,
+    settings: proto::AppSettings,
+) -> Result<(), String> {
+    match mode {
+        ConnectionMode::Usb { authorized: true } => {
+            match keyboard::KeyboardConnection::open() {
+                Ok(conn) => proto::set_settings(conn.device(), settings),
+                Err(e) => Err(e),
+            }
+        }
+        ConnectionMode::Ble { .. } => {
+            if let Some(ref conn) = ble_conn {
+                conn.set_settings(settings).await
+            } else {
+                Err("BLE not connected".to_string())
+            }
+        }
+        _ => Err("Not connected".to_string()),
+    }
+}
+
 async fn run_background(
     cmd_rx: std::sync::mpsc::Receiver<KeyboardCommand>,
     event_tx: std::sync::mpsc::Sender<KeyboardEvent>,
@@ -427,22 +465,17 @@ async fn run_background(
                         counter: None,
                     };
 
-                    let result = match &mode {
-                        ConnectionMode::Usb { authorized: true } => {
-                            match keyboard::KeyboardConnection::open() {
-                                Ok(conn) => proto::set_settings(conn.device(), settings),
-                                Err(e) => Err(e),
-                            }
-                        }
-                        ConnectionMode::Ble { .. } => {
-                            if let Some(ref conn) = ble_conn {
-                                conn.set_settings(settings).await
-                            } else {
-                                Err("BLE not connected".to_string())
-                            }
-                        }
-                        _ => Err("Not connected".to_string()),
+                    let result = send_settings(&mode, &ble_conn, settings).await;
+                    let _ = event_tx.send(KeyboardEvent::SettingsResult(result));
+                }
+                KeyboardCommand::SetGlobalSettings(global) => {
+                    let settings = proto::AppSettings {
+                        global: Some(global),
+                        global_profile: None,
+                        counter: None,
                     };
+
+                    let result = send_settings(&mode, &ble_conn, settings).await;
                     let _ = event_tx.send(KeyboardEvent::SettingsResult(result));
                 }
             }
@@ -451,14 +484,35 @@ async fn run_background(
         // Poll keyboard state — try USB first, then BLE
         let mut ai_level = None;
         let mut battery_hb = None;
+        let mut fw_settings = None;
 
         let hw_state = match keyboard::KeyboardConnection::open() {
             Ok(conn) => {
                 // USB connected
+                let was_connected = matches!(mode, ConnectionMode::Usb { .. });
                 let authorized = matches!(mode, ConnectionMode::Usb { authorized: true });
                 if !authorized {
                     if conn.authorize().is_ok() {
                         mode = ConnectionMode::Usb { authorized: true };
+
+                        // On first connection:
+                        // 1. Disable AI touch processing → standard HID touchpad
+                        // 2. Re-apply current settings to re-initialize the touch
+                        //    controller (triggers firmware to emit proper multitouch)
+                        if !was_connected {
+                            let request = proto::Request {
+                                r#type: proto::RequestType::ControlAi as i32,
+                                control_ai: Some(proto::ControlAiRequest { mode: 0 }),
+                                ..Default::default()
+                            };
+                            let _ = proto::send_proto_request(conn.device(), &request);
+
+                            // Read current settings and write them back — this
+                            // re-initializes the touch controller for full multitouch.
+                            if let Ok(current) = proto::get_settings(conn.device()) {
+                                let _ = proto::set_settings(conn.device(), current);
+                            }
+                        }
                     } else {
                         mode = ConnectionMode::Usb { authorized: false };
                     }
@@ -472,6 +526,7 @@ async fn run_background(
                             .global
                             .as_ref()
                             .and_then(|g| g.current_ai_level);
+                        fw_settings = settings.global.clone();
                     }
                     if let Ok(batt) = proto::heartbeat(conn.device(), 0) {
                         battery_hb = batt;
@@ -513,6 +568,7 @@ async fn run_background(
                                 .global
                                 .as_ref()
                                 .and_then(|g| g.current_ai_level);
+                            fw_settings = settings.global.clone();
 
                             // Try heartbeat for battery
                             if let Ok(batt) = conn.heartbeat(0).await {
@@ -552,6 +608,7 @@ async fn run_background(
         let _ = event_tx.send(KeyboardEvent::StateUpdate {
             hw_state,
             ai_level,
+            firmware_settings: fw_settings,
             battery_from_heartbeat: battery_hb,
             connection_type: conn_type,
         });

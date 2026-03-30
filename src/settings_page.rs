@@ -51,14 +51,34 @@ pub struct State {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    // Sensitivity
     SensitivityChanged(u8),
+    // Sliders
     LeftSliderSelected(usize),
     RightSliderSelected(usize),
+    // Touch settings
+    Tap1fToggled(bool),
+    Tap2fToggled(bool),
+    HoldGestureToggled(bool),
+    SwapClicksToggled(bool),
+    TouchAfterLiftoffToggled(bool),
+    NewbieModeToggled(bool),
+    KeySuppressorToggled(bool),
+    HoldDelayOnBorderToggled(bool),
+    // Keyboard settings
+    FnLockToggled(bool),
+    LeftHandedToggled(bool),
+    SwapFnCtrlToggled(bool),
+    // Hardware settings
+    AutoBrightnessToggled(bool),
+    BatterySavingToggled(bool),
+    // Profiles
     ProfilesEnabledToggled(bool),
     NewProfileNameChanged(String),
     NewProfileAppIdChanged(String),
     AddProfile,
     RemoveProfile(usize),
+    // Actions
     Save,
     ResetDefaults,
 }
@@ -96,6 +116,23 @@ pub fn update(state: &mut State, message: Message) {
             state.config.right_slider = slider_action_from_index(idx);
             state.status_message = "Unsaved changes".to_string();
         }
+        // Touch settings
+        Message::Tap1fToggled(v) => { state.config.tap_1f = v; state.status_message = "Unsaved changes".into(); }
+        Message::Tap2fToggled(v) => { state.config.tap_2f = v; state.status_message = "Unsaved changes".into(); }
+        Message::HoldGestureToggled(v) => { state.config.hold_gesture = v; state.status_message = "Unsaved changes".into(); }
+        Message::SwapClicksToggled(v) => { state.config.swap_clicks = v; state.status_message = "Unsaved changes".into(); }
+        Message::TouchAfterLiftoffToggled(v) => { state.config.touch_after_liftoff = v; state.status_message = "Unsaved changes".into(); }
+        Message::NewbieModeToggled(v) => { state.config.newbie_mode = v; state.status_message = "Unsaved changes".into(); }
+        Message::KeySuppressorToggled(v) => { state.config.key_suppressor = v; state.status_message = "Unsaved changes".into(); }
+        Message::HoldDelayOnBorderToggled(v) => { state.config.hold_delay_on_border = v; state.status_message = "Unsaved changes".into(); }
+        // Keyboard settings
+        Message::FnLockToggled(v) => { state.config.fn_lock = v; state.status_message = "Unsaved changes".into(); }
+        Message::LeftHandedToggled(v) => { state.config.left_handed = v; state.status_message = "Unsaved changes".into(); }
+        Message::SwapFnCtrlToggled(v) => { state.config.swap_fn_ctrl = v; state.status_message = "Unsaved changes".into(); }
+        // Hardware settings
+        Message::AutoBrightnessToggled(v) => { state.config.auto_brightness = v; state.status_message = "Unsaved changes".into(); }
+        Message::BatterySavingToggled(v) => { state.config.battery_saving = v; state.status_message = "Unsaved changes".into(); }
+        // Profiles
         Message::ProfilesEnabledToggled(enabled) => {
             state.config.profiles_enabled = enabled;
             state.status_message = "Unsaved changes".to_string();
@@ -169,6 +206,70 @@ pub fn view(state: &State) -> Element<'_, Message> {
         ))
         .add(settings::item_row(vec![sensitivity_buttons.into()]));
 
+    // Touch behaviour section
+    let touch_section = settings::section()
+        .title("Touch Behaviour")
+        .add(settings::item(
+            "Single-finger tap",
+            widget::toggler(state.config.tap_1f).on_toggle(Message::Tap1fToggled),
+        ))
+        .add(settings::item(
+            "Two-finger tap (right-click)",
+            widget::toggler(state.config.tap_2f).on_toggle(Message::Tap2fToggled),
+        ))
+        .add(settings::item(
+            "Hold gesture",
+            widget::toggler(state.config.hold_gesture).on_toggle(Message::HoldGestureToggled),
+        ))
+        .add(settings::item(
+            "Swap click buttons (left/right)",
+            widget::toggler(state.config.swap_clicks).on_toggle(Message::SwapClicksToggled),
+        ))
+        .add(settings::item(
+            "Touch activation after lift-off",
+            widget::toggler(state.config.touch_after_liftoff).on_toggle(Message::TouchAfterLiftoffToggled),
+        ))
+        .add(settings::item(
+            "Newbie mode (simplified touch)",
+            widget::toggler(state.config.newbie_mode).on_toggle(Message::NewbieModeToggled),
+        ))
+        .add(settings::item(
+            "Key suppressor (prevent accidental keys during touch)",
+            widget::toggler(state.config.key_suppressor).on_toggle(Message::KeySuppressorToggled),
+        ))
+        .add(settings::item(
+            "Hold delay on border",
+            widget::toggler(state.config.hold_delay_on_border).on_toggle(Message::HoldDelayOnBorderToggled),
+        ));
+
+    // Keyboard settings section
+    let keyboard_section = settings::section()
+        .title("Keyboard")
+        .add(settings::item(
+            "Fn Lock (Fn key always active)",
+            widget::toggler(state.config.fn_lock).on_toggle(Message::FnLockToggled),
+        ))
+        .add(settings::item(
+            "Left-handed mode",
+            widget::toggler(state.config.left_handed).on_toggle(Message::LeftHandedToggled),
+        ))
+        .add(settings::item(
+            "Swap Fn and Ctrl keys",
+            widget::toggler(state.config.swap_fn_ctrl).on_toggle(Message::SwapFnCtrlToggled),
+        ));
+
+    // Hardware section
+    let hardware_section = settings::section()
+        .title("Hardware")
+        .add(settings::item(
+            "Auto brightness",
+            widget::toggler(state.config.auto_brightness).on_toggle(Message::AutoBrightnessToggled),
+        ))
+        .add(settings::item(
+            "Battery saving mode",
+            widget::toggler(state.config.battery_saving).on_toggle(Message::BatterySavingToggled),
+        ));
+
     // Touch sliders section
     let sliders_section = settings::section()
         .title("Touch Sliders")
@@ -200,7 +301,6 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .add(settings::item("Enable per-app profiles", profiles_toggle));
 
     if state.config.profiles_enabled {
-        // List existing profiles
         for (idx, profile) in state.config.profiles.iter().enumerate() {
             let label = format!("{} ({})", profile.name, profile.app_id);
             profiles_section = profiles_section.add(settings::item(
@@ -209,7 +309,6 @@ pub fn view(state: &State) -> Element<'_, Message> {
             ));
         }
 
-        // Add new profile
         profiles_section = profiles_section
             .add(settings::item(
                 "Profile name",
@@ -239,6 +338,9 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let mut content_items: Vec<Element<'_, Message>> = vec![
         page_title.into(),
         sensitivity_section.into(),
+        touch_section.into(),
+        keyboard_section.into(),
+        hardware_section.into(),
         sliders_section.into(),
         profiles_section.into(),
         actions_section.into(),

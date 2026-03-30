@@ -97,30 +97,24 @@ fn main() -> cosmic::iced::Result {
                 Ok(())
             }
             "--ble-info" => {
-                let address = if args.len() >= 3 {
-                    args[2].clone()
-                } else {
-                    // Auto-discover first BLE device
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    let addr = rt.block_on(async {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let address = if args.len() >= 3 {
+                        args[2].clone()
+                    } else {
                         println!("Scanning for Clevetura BLE devices (3 seconds)...");
                         match ble::scan_devices(std::time::Duration::from_secs(3)).await {
                             Ok(devices) if !devices.is_empty() => {
-                                Some(devices[0].address.clone())
+                                devices[0].address.clone()
                             }
-                            _ => None,
+                            _ => {
+                                eprintln!("No Clevetura BLE devices found. Use --ble-info <address>");
+                                std::process::exit(1);
+                            }
                         }
-                    });
-                    match addr {
-                        Some(a) => a,
-                        None => {
-                            eprintln!("No Clevetura BLE devices found. Use --ble-info <address>");
-                            std::process::exit(1);
-                        }
-                    }
-                };
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(ble::print_ble_info(&address));
+                    };
+                    ble::print_ble_info(&address).await;
+                });
                 Ok(())
             }
             "--help" | "-h" => {
@@ -129,6 +123,103 @@ fn main() -> cosmic::iced::Result {
             }
             "--version" | "-v" => {
                 println!("cosmic-clevetura {}", env!("CARGO_PKG_VERSION"));
+                Ok(())
+            }
+            "--ai-off" => {
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        let request = proto::Request {
+                            r#type: proto::RequestType::ControlAi as i32,
+                            control_ai: Some(proto::ControlAiRequest { mode: 0 }),
+                            ..Default::default()
+                        };
+                        match proto::send_proto_request(conn.device(), &request) {
+                            Ok(resp) => println!("AI off response: type={}, bad_request={:?}", resp.r#type, resp.bad_request),
+                            Err(e) => eprintln!("Failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
+                Ok(())
+            }
+            "--ai-on" => {
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        let request = proto::Request {
+                            r#type: proto::RequestType::ControlAi as i32,
+                            control_ai: Some(proto::ControlAiRequest { mode: 1 }),
+                            ..Default::default()
+                        };
+                        match proto::send_proto_request(conn.device(), &request) {
+                            Ok(resp) => println!("AI on response: type={}, bad_request={:?}", resp.r#type, resp.bad_request),
+                            Err(e) => eprintln!("Failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
+                Ok(())
+            }
+            "--ai-state" => {
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        let request = proto::Request {
+                            r#type: proto::RequestType::GetAiState as i32,
+                            get_ai_state: Some(proto::GetAiStateRequest {}),
+                            ..Default::default()
+                        };
+                        match proto::send_proto_request(conn.device(), &request) {
+                            Ok(resp) => {
+                                println!("AI state response: type={}", resp.r#type);
+                                if let Some(ai) = resp.get_ai_state {
+                                    println!("  mode: {:?}, active: {:?}", ai.mode, ai.active);
+                                }
+                                if let Some(bad) = resp.bad_request {
+                                    println!("  bad_request: {}", bad.error);
+                                }
+                            }
+                            Err(e) => eprintln!("Failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
+                Ok(())
+            }
+            "--factory-reset" => {
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        let request = proto::Request {
+                            r#type: proto::RequestType::PerformFullReset as i32,
+                            ..Default::default()
+                        };
+                        match proto::send_proto_request(conn.device(), &request) {
+                            Ok(resp) => println!("Reset response: type={}", resp.r#type),
+                            Err(e) => eprintln!("Failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
+                Ok(())
+            }
+            "--set-os-mode" => {
+                let mode: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(-1);
+                if !(0..=2).contains(&mode) {
+                    eprintln!("Usage: cosmic-clevetura --set-os-mode <0=win|1=mac|2=linux>");
+                    std::process::exit(1);
+                }
+                match keyboard::KeyboardConnection::open() {
+                    Ok(conn) => {
+                        conn.authorize().ok();
+                        match proto::set_os_mode(conn.device(), mode) {
+                            Ok(()) => println!("OS mode set to {}", ["Windows", "macOS", "Linux"][mode as usize]),
+                            Err(e) => eprintln!("Failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("Could not open keyboard: {e}"),
+                }
                 Ok(())
             }
             "--settings-describe" => {
