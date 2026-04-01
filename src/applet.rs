@@ -416,20 +416,40 @@ impl CleveturaApplet {
 /// Connection type tracking for the background thread.
 enum ConnectionMode {
     None,
-    Usb { authorized: bool },
+    Usb {
+        authorized: bool,
+        /// True once initial setup (ControlAi off + settings sync) is done.
+        /// After setup, we avoid protobuf traffic to prevent the firmware
+        /// from re-enabling AI touch processing.
+        setup_done: bool,
+    },
     Ble { address: String },
 }
 
 /// Send settings to the keyboard via whichever transport is active.
+/// For USB: after writing settings, re-sends ControlAi(off) to prevent
+/// the protobuf traffic from re-enabling AI touch processing.
 async fn send_settings(
     mode: &ConnectionMode,
     ble_conn: &Option<crate::ble::BleConnection>,
     settings: proto::AppSettings,
 ) -> Result<(), String> {
     match mode {
-        ConnectionMode::Usb { authorized: true } => {
+        ConnectionMode::Usb { authorized: true, .. } => {
             match keyboard::KeyboardConnection::open() {
-                Ok(conn) => proto::set_settings(conn.device(), settings),
+                Ok(conn) => {
+                    let result = proto::set_settings(conn.device(), settings);
+                    // Re-disable AI after protobuf traffic to keep multitouch working
+                    let request = proto::Request {
+                        r#type: proto::RequestType::ControlAi as i32,
+                        control_ai: Some(proto::ControlAiRequest { mode: 0 }),
+                        ..Default::default()
+                    };
+                    if let Err(e) = proto::send_proto_request(conn.device(), &request) {
+                        eprintln!("ControlAi(off) after settings update failed: {e}");
+                    }
+                    result
+                }
                 Err(e) => Err(e),
             }
         }
@@ -490,48 +510,53 @@ async fn run_background(
             Ok(conn) => {
                 // USB connected
                 let was_connected = matches!(mode, ConnectionMode::Usb { .. });
-                let authorized = matches!(mode, ConnectionMode::Usb { authorized: true });
+                let authorized = matches!(mode, ConnectionMode::Usb { authorized: true, .. });
+                let _setup_done = matches!(mode, ConnectionMode::Usb { setup_done: true, .. });
+
                 if !authorized {
                     if conn.authorize().is_ok() {
-                        mode = ConnectionMode::Usb { authorized: true };
+                        mode = ConnectionMode::Usb { authorized: true, setup_done: false };
 
                         // On first connection:
                         // 1. Disable AI touch processing → standard HID touchpad
-                        // 2. Re-apply current settings to re-initialize the touch
-                        //    controller (triggers firmware to emit proper multitouch)
+                        // 2. Read settings for the UI, then re-apply to re-initialize
+                        //    the touch controller for proper multitouch
+                        // After this, we stop all protobuf traffic to avoid the
+                        // firmware interpreting it as "companion app active" and
+                        // re-enabling AI mode.
                         if !was_connected {
                             let request = proto::Request {
                                 r#type: proto::RequestType::ControlAi as i32,
                                 control_ai: Some(proto::ControlAiRequest { mode: 0 }),
                                 ..Default::default()
                             };
-                            let _ = proto::send_proto_request(conn.device(), &request);
+                            if let Err(e) = proto::send_proto_request(conn.device(), &request) {
+                                eprintln!("ControlAi(off) failed: {e}");
+                            }
 
-                            // Read current settings and write them back — this
-                            // re-initializes the touch controller for full multitouch.
+                            // Read current settings — capture for the UI, then write
+                            // back to re-initialize the touch controller.
                             if let Ok(current) = proto::get_settings(conn.device()) {
+                                ai_level = current
+                                    .global
+                                    .as_ref()
+                                    .and_then(|g| g.current_ai_level);
+                                fw_settings = current.global.clone();
                                 let _ = proto::set_settings(conn.device(), current);
                             }
+
+                            mode = ConnectionMode::Usb { authorized: true, setup_done: true };
                         }
                     } else {
-                        mode = ConnectionMode::Usb { authorized: false };
+                        mode = ConnectionMode::Usb { authorized: false, setup_done: false };
                     }
                 }
 
+                // After initial setup, use only Layer 1 (firmware commands) for
+                // polling. No protobuf traffic — no get_settings, no heartbeat —
+                // so the firmware doesn't think a companion app is active and
+                // re-enable AI touch processing.
                 let state = conn.read_state();
-
-                if matches!(mode, ConnectionMode::Usb { authorized: true }) {
-                    if let Ok(settings) = proto::get_settings(conn.device()) {
-                        ai_level = settings
-                            .global
-                            .as_ref()
-                            .and_then(|g| g.current_ai_level);
-                        fw_settings = settings.global.clone();
-                    }
-                    if let Ok(batt) = proto::heartbeat(conn.device(), 0) {
-                        battery_hb = batt;
-                    }
-                }
 
                 // Drop any BLE connection when USB is available
                 if ble_conn.is_some() {
